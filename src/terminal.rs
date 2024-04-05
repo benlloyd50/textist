@@ -7,6 +7,8 @@ use crossterm::{
     terminal::{enable_raw_mode, size, Clear, ClearType},
 };
 
+use crate::editor::Position;
+
 pub struct Size {
     pub width: u16,
     pub height: u16,
@@ -39,7 +41,16 @@ impl Terminal {
         }
     }
 
-    pub fn move_cursor(x: u16, y: u16) {
+    pub fn move_cursor(position: &Position) {
+        let x = match position.x.try_into() {
+            Ok(x) => x,
+            Err(_) => u16::MAX,
+        };
+        let y = match position.y.try_into() {
+            Ok(y) => y,
+            Err(_) => u16::MAX,
+        };
+
         if let Err(e) = execute!(io::stdout(), MoveTo(x, y)) {
             panic!("Panic during cursor movement. {}", e);
         }
