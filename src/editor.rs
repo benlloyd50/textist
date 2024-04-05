@@ -216,8 +216,7 @@ fn equispace_words(width: usize, words: &[String]) -> String {
     }
 
     let space_remaining = width - total_word_len;
-    // NOTE: changing this divisor does not change the output, what gives??
-    let space_between = space_remaining / words.len() - 0;
+    let space_between = space_remaining / (words.len() - 1);
     let mut output = "".to_string();
     for (idx, word) in words.iter().enumerate() {
         output += word;
