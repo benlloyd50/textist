@@ -1,27 +1,50 @@
-use std::{cmp, env, process::exit, time::Duration};
+use std::{
+    cmp, env,
+    fmt::Display,
+    process::exit,
+    time::{Duration, Instant},
+};
 
 use crossterm::{
-    event::{poll, read, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{poll, read, Event, KeyCode, KeyEvent, KeyEventKind},
+    style::Stylize,
     terminal::disable_raw_mode,
 };
 
-use crate::document::Document;
-use crate::terminal::Terminal;
+use crate::{document::Document, keybinds::control_and, status_message};
+use crate::{status_message::StatusMessage, terminal::Terminal};
 
 const EDITOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Editor {
     should_quit: bool,
     dirty: bool,
+
     terminal: Terminal,
-    document: Document,
     cursor: Position,
+
+    document: Document,
     offset: Position,
+
+    status_message: StatusMessage,
 }
 
 pub struct Position {
     pub x: usize,
     pub y: usize,
+}
+impl Position {
+    // displays the position in the file, 1-based
+    fn file_position(&self) -> String {
+        format!("{:2}, {:2}", self.x + 1, self.y + 1)
+    }
+}
+
+impl Display for Position {
+    // the actualy position
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}, {}", self.x, self.y)
+    }
 }
 
 impl From<(usize, usize)> for Position {
@@ -50,6 +73,7 @@ impl Default for Editor {
             document,
             cursor: Position { x: 0, y: 0 },
             offset: Position { x: 0, y: 0 },
+            status_message: StatusMessage::new("Welcome to TextRighter".to_string()),
         }
     }
 }
@@ -61,8 +85,12 @@ impl Editor {
                 self.refresh_screen();
                 self.draw_rows();
                 self.draw_status_bar();
+                if self.status_message.is_showing() {
+                    self.draw_status_message();
+                }
                 self.dirty = false;
             }
+            // where to draw the cursor on screen
             Terminal::move_cursor(&Position {
                 x: self.cursor.x.saturating_sub(self.offset.x),
                 y: self.cursor.y.saturating_sub(self.offset.y),
@@ -108,16 +136,37 @@ impl Editor {
             return Ok(());
         }
 
-        if matches!(ev_key.code, KeyCode::Char('q'))
-            && ev_key.modifiers.contains(KeyModifiers::CONTROL)
-        {
+        if control_and('q', ev_key) {
             self.should_quit = true;
+        }
+        if control_and('s', ev_key) {
+            match self.document.save() {
+                Ok(_) => self.status_message.reset(Some("File saved".to_string())),
+                Err(err) => self
+                    .status_message
+                    .reset(format!("File unable to be saved: {}", err).into()),
+            }
+            return Ok(());
         }
 
         match ev_key.code {
-            KeyCode::Char(c) => print!("{}", c),
+            KeyCode::Char(c) => {
+                self.document.insert(&self.cursor, c);
+                self.cursor.x = self.cursor.x.saturating_add(1);
+            }
             KeyCode::Up | KeyCode::Left | KeyCode::Right | KeyCode::Down => {
                 self.move_cursor(ev_key.code)
+            }
+            KeyCode::Backspace => {
+                self.document.remove_behind(&mut self.cursor);
+            }
+            KeyCode::Delete => {
+                self.document.remove_ahead(&mut self.cursor);
+            }
+            KeyCode::Enter => {
+                self.document.add_line(&self.cursor);
+                self.cursor.y = self.cursor.y.saturating_add(1);
+                self.cursor.x = 0;
             }
             _ => {}
         }
@@ -128,7 +177,8 @@ impl Editor {
     fn draw_rows(&self) {
         let height = self.terminal.size.height as usize + self.offset.y;
         let width = self.terminal.size.width as usize + self.offset.x;
-        for i in self.offset.y..height - 1 {
+        // 2 spaces for the status bar height
+        for i in self.offset.y..height - 2 {
             match self.document.rows.get(i as usize) {
                 Some(s) => println!("{}\r", s.render(self.offset.x, width)),
                 None => println!("~\r"),
@@ -168,6 +218,7 @@ impl Editor {
         // stop cursor before end of file
         self.cursor.y = cmp::min(self.cursor.y, self.document.len() - 1);
 
+        // config: let x go past the last character in the line
         let max_x = match self.document.rows.get(self.cursor.y) {
             Some(row) => row.len(),
             None => 0,
@@ -181,7 +232,7 @@ impl Editor {
             self.offset.x = self.cursor.x;
         }
 
-        if self.cursor.y > self.offset.y + self.terminal.size.height as usize - 1 {
+        if self.cursor.y > self.offset.y + self.terminal.size.height as usize - 3 {
             self.offset.y += 1;
         } else if self.cursor.y < self.offset.y {
             self.offset.y = self.cursor.y;
@@ -191,21 +242,32 @@ impl Editor {
     fn draw_status_bar(&self) {
         Terminal::move_cursor(&Position {
             x: 0,
-            y: self.terminal.size.height as usize,
+            y: self.terminal.size.height as usize - 2,
         });
 
-        let status_notes = vec![
-            "src/filename.txt".to_string(),
-            "INSERT".to_string(),
-            "22, 3".to_string(),
-        ];
+        // config: status bar items
+        let cursor_pos = self.cursor.file_position();
+        let status_notes = vec![self.document.file_name(), "INSERT", &cursor_pos];
         let fmt_status = equispace_words(self.terminal.size.width.into(), &status_notes);
-        print!("{}", fmt_status);
+
+        // config: status bar color
+        print!("{}", fmt_status.white().on_dark_blue());
+    }
+
+    fn draw_status_message(&self) {
+        Terminal::move_cursor(&Position {
+            x: 0,
+            y: self.terminal.size.height as usize - 1,
+        });
+
+        print!(
+            "{}",
+            self.status_message.render(self.terminal.size.width.into())
+        );
     }
 }
 
-// BUG: last word is not being right aligned
-fn equispace_words(width: usize, words: &[String]) -> String {
+fn equispace_words(width: usize, words: &[&str]) -> String {
     let total_word_len = words.iter().fold(0, |mut acc, s| {
         acc += s.len();
         acc
@@ -225,5 +287,11 @@ fn equispace_words(width: usize, words: &[String]) -> String {
             output += &" ".repeat(space_between);
         }
     }
+
+    // pads the text with space at the end
+    if output.len() < width {
+        output += &" ".repeat(width - output.len());
+    }
+
     output
 }
