@@ -10,7 +10,7 @@ use crate::editor::Position;
 #[derive(Default)]
 pub struct Document {
     pub rows: Vec<Row>,
-    file_name: String,
+    pub file_name: String,
 }
 
 impl Document {
@@ -18,7 +18,12 @@ impl Document {
     pub fn open(file_name: &str) -> Self {
         let contents = match fs::read_to_string(file_name) {
             Ok(c) => c,
-            Err(_) => return Document::default(),
+            Err(_) => {
+                return Document {
+                    file_name: file_name.to_string(),
+                    rows: vec![],
+                };
+            }
         };
 
         let mut rows = vec![];
@@ -46,7 +51,15 @@ impl Document {
     }
 
     pub fn insert(&mut self, at: &Position, c: char) {
-        let row = self.rows.get_mut(at.y).unwrap();
+        let row = match self.rows.get_mut(at.y) {
+            Some(row) => row,
+            None => {
+                self.rows.insert(at.y, Row::default());
+                // unwrap - insertion prior so it should be there
+                self.rows.get_mut(at.y).unwrap()
+            }
+        };
+
         row.string.insert(at.x, c);
     }
 
@@ -119,10 +132,6 @@ impl Document {
 
     pub(crate) fn len(&self) -> usize {
         self.rows.len()
-    }
-
-    pub(crate) fn file_name(&self) -> &str {
-        &self.file_name
     }
 }
 

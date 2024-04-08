@@ -1,17 +1,14 @@
-use std::{
-    cmp, env,
-    fmt::Display,
-    process::exit,
-    time::{Duration, Instant},
-};
+use std::{cmp, env, fmt::Display, io, process::exit, time::Duration};
 
+use chrono::Local;
 use crossterm::{
     event::{poll, read, Event, KeyCode, KeyEvent, KeyEventKind},
+    execute,
     style::Stylize,
-    terminal::disable_raw_mode,
+    terminal::{disable_raw_mode, Clear, ClearType},
 };
 
-use crate::{document::Document, keybinds::control_and, status_message};
+use crate::{document::Document, keybinds::control_and};
 use crate::{status_message::StatusMessage, terminal::Terminal};
 
 const EDITOR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -140,11 +137,29 @@ impl Editor {
             self.should_quit = true;
         }
         if control_and('s', ev_key) {
+            if self.document.file_name.is_empty() {
+                let name = match self.promptn("Save as: ") {
+                    Some(n) => n,
+                    None => {
+                        format!("unnamed_{:}.txt", Local::now().format("%Y%m%d%H%M"))
+                    }
+                };
+                self.document.file_name = name;
+            }
+
             match self.document.save() {
-                Ok(_) => self.status_message.reset(Some("File saved".to_string())),
-                Err(err) => self
+                Ok(_) => self
                     .status_message
-                    .reset(format!("File unable to be saved: {}", err).into()),
+                    .reset(Some(format!("{} was saved.", self.document.file_name))),
+                Err(err) => {
+                    self.status_message.reset(
+                        format!(
+                            "File {} unable to be saved: {}",
+                            self.document.file_name, err
+                        )
+                        .into(),
+                    );
+                }
             }
             return Ok(());
         }
@@ -247,7 +262,7 @@ impl Editor {
 
         // config: status bar items
         let cursor_pos = self.cursor.file_position();
-        let status_notes = vec![self.document.file_name(), "INSERT", &cursor_pos];
+        let status_notes = vec![&self.document.file_name, "INSERT", &cursor_pos];
         let fmt_status = equispace_words(self.terminal.size.width.into(), &status_notes);
 
         // config: status bar color
@@ -264,6 +279,47 @@ impl Editor {
             "{}",
             self.status_message.render(self.terminal.size.width.into())
         );
+    }
+
+    // Given a prompt asks the user for a string answer
+    fn prompt(&mut self, prompt: &str, start_response: Option<&str>) -> Option<String> {
+        Terminal::move_cursor(&Position {
+            x: 0,
+            y: self.terminal.size.height as usize - 1,
+        });
+        let mut result = start_response.unwrap_or("").to_string();
+        loop {
+            let _ = execute!(io::stdout(), Clear(ClearType::CurrentLine));
+            self.status_message
+                .reset(Some(format!("{}{}", prompt, result)));
+            self.draw_status_message();
+            Terminal::flush();
+
+            match read() {
+                Ok(ev) => match ev {
+                    Event::Key(ev_key) => match ev_key.code {
+                        KeyCode::Left => self.cursor.x -= 1,
+                        KeyCode::Right => self.cursor.x += 1,
+                        KeyCode::Char(c) => result.push(c),
+                        KeyCode::Enter => return Some(result),
+                        KeyCode::Esc => return None,
+                        KeyCode::Backspace => {
+                            let _ = result.pop();
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                },
+                Err(_) => {
+                    // ignore the errors lol
+                }
+            };
+        }
+    }
+
+    // helper to call prompt without a
+    fn promptn(&mut self, arg: &str) -> Option<String> {
+        self.prompt(arg, None)
     }
 }
 
