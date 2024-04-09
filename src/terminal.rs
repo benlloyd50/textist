@@ -19,12 +19,15 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    // Initalizes the terminal (as well as stdout)
+    // Initalizes the terminal
     pub(crate) fn setup() -> Result<Terminal, io::Error> {
-        execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
-        )?;
+        if cfg!(unix) {
+            execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
+            )?;
+        }
+
         enable_raw_mode()?;
         let term_size = size()?;
         Ok(Terminal {
@@ -35,8 +38,16 @@ impl Terminal {
         })
     }
 
+    // Clears the entire terminal display
     pub fn clear_screen() {
         if let Err(e) = execute!(io::stdout(), Clear(ClearType::All)) {
+            panic!("{}", e);
+        }
+    }
+
+    // Clears the line the cursor is currently positioned on
+    pub fn clear_line() {
+        if let Err(e) = execute!(io::stdout(), Clear(ClearType::CurrentLine)) {
             panic!("{}", e);
         }
     }
