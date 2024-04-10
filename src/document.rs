@@ -148,7 +148,7 @@ impl Row {
         let output = self.string.get(start..end).unwrap_or_default().to_string();
 
         // config: visible spaces
-        replace_spaces_to_first_word(&output, &".".dim().to_string())
+        output.replace(" ", &".".dim().to_string())
     }
 
     pub fn len(&self) -> usize {
@@ -164,23 +164,10 @@ impl From<&str> for Row {
     }
 }
 
-fn replace_spaces_to_first_word(text: &str, with: &str) -> String {
-    let mut first_non_space: usize = 0;
-    for c in text.chars() {
-        if c == ' ' {
-            first_non_space += 1;
-        } else {
-            break;
+impl From<String> for Row {
+    fn from(string: String) -> Self {
+        Self {
+            string: string.into(),
         }
     }
-
-    if first_non_space == 0 {
-        return text.to_string();
-    }
-
-    let mut output = String::new();
-    for _ in 0..first_non_space {
-        output += &with.dim().to_string();
-    }
-    output + text.get(first_non_space..).unwrap()
 }
