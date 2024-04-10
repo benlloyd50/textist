@@ -28,7 +28,8 @@ impl Document {
 
         let mut rows = vec![];
         for line in contents.lines() {
-            rows.push(line.into());
+            let line = line.replace("\t", "    ").into();
+            rows.push(line);
         }
 
         Self {
