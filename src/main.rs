@@ -5,6 +5,7 @@ use editor::Editor;
 mod document;
 mod editor;
 mod keybinds;
+mod modal;
 mod status_message;
 mod terminal;
 

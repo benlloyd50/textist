@@ -2,12 +2,15 @@ use std::{cmp, env, fmt::Display, process::exit, time::Duration};
 
 use chrono::Local;
 use crossterm::{
-    event::{poll, read, Event, KeyCode, KeyEvent, KeyEventKind},
+    event::{poll, read, Event, KeyCode, KeyEventKind},
     style::Stylize,
     terminal::disable_raw_mode,
 };
 
-use crate::{document::Document, keybinds::control_and};
+use crate::{
+    document::Document,
+    modal::{Direction, InputAction, InputMode, ModalInput},
+};
 use crate::{status_message::StatusMessage, terminal::Terminal};
 
 const EDITOR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -21,6 +24,8 @@ pub struct Editor {
 
     document: Document,
     offset: Position,
+
+    mode: Box<dyn ModalInput>,
 
     status_message: StatusMessage,
 }
@@ -69,7 +74,8 @@ impl Default for Editor {
             document,
             cursor: Position { x: 0, y: 0 },
             offset: Position { x: 0, y: 0 },
-            status_message: StatusMessage::new("Welcome to Texist".to_string()),
+            status_message: StatusMessage::new("Welcome to Textist".to_string()),
+            mode: Box::new(crate::modal::Insert),
         }
     }
 }
@@ -94,13 +100,49 @@ impl Editor {
                 };
                 match read {
                     Event::Key(ev_key) => {
-                        let _ = self.process_key_press(ev_key);
+                        let action = self.mode.process_key_press(ev_key);
+                        self.handle_action(action);
+                        self.dirty = true;
+                        self.pull_view_to_cursor();
                     }
                     _ => {}
                 }
             } else {
                 // no events found
             }
+        }
+    }
+
+    fn handle_action(&mut self, action: InputAction) {
+        match action {
+            InputAction::NoAction => {}
+            InputAction::Save => {
+                self.save_document();
+            }
+            InputAction::Quit => {
+                self.should_quit = true;
+            }
+            InputAction::MoveCursor(code) => self.move_cursor(code),
+            InputAction::InsertChar(c) => {
+                self.document.insert(&self.cursor, c);
+                self.cursor.x = self.cursor.x.saturating_add(1);
+            }
+            InputAction::NewLine => {
+                self.document.add_line(&self.cursor);
+                self.cursor.y = self.cursor.y.saturating_add(1);
+                self.cursor.x = 0;
+            }
+            InputAction::DeleteBehind => {
+                self.document.remove_behind(&mut self.cursor);
+            }
+            InputAction::DeleteAhead => {
+                self.document.remove_ahead(&mut self.cursor);
+            }
+            InputAction::ModeChange(mode) => match mode {
+                InputMode::Insert => self.mode = Box::new(crate::modal::Insert),
+                InputMode::Normal => self.mode = Box::new(crate::modal::Normal),
+                InputMode::Command => self.mode = Box::new(crate::modal::Command),
+            },
         }
     }
 
@@ -119,70 +161,6 @@ impl Editor {
         self.draw_status_message();
         Terminal::show_cursor();
         Terminal::flush();
-    }
-
-    // only handles keys that are pressed this frame, NOT released
-    fn process_key_press(&mut self, ev_key: KeyEvent) -> Result<(), std::io::Error> {
-        if ev_key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        self.dirty = true;
-
-        if control_and('q', ev_key) {
-            self.should_quit = true;
-        }
-        if control_and('s', ev_key) {
-            if self.document.file_name.is_empty() {
-                let name = match self.prompt("Save as: ", None) {
-                    Some(n) => n,
-                    None => {
-                        format!("unnamed_{:}.txt", Local::now().format("%Y%m%d%H%M"))
-                    }
-                };
-                self.document.file_name = name;
-            }
-
-            match self.document.save() {
-                Ok(_) => self
-                    .status_message
-                    .reset(Some(format!("{} was saved.", self.document.file_name))),
-                Err(err) => {
-                    self.status_message.reset(
-                        format!(
-                            "File {} unable to be saved: {}",
-                            self.document.file_name, err
-                        )
-                        .into(),
-                    );
-                }
-            }
-            return Ok(());
-        }
-
-        match ev_key.code {
-            KeyCode::Char(c) => {
-                self.document.insert(&self.cursor, c);
-                self.cursor.x = self.cursor.x.saturating_add(1);
-            }
-            KeyCode::Up | KeyCode::Left | KeyCode::Right | KeyCode::Down => {
-                self.move_cursor(ev_key.code)
-            }
-            KeyCode::Backspace => {
-                self.document.remove_behind(&mut self.cursor);
-            }
-            KeyCode::Delete => {
-                self.document.remove_ahead(&mut self.cursor);
-            }
-            KeyCode::Enter => {
-                self.document.add_line(&self.cursor);
-                self.cursor.y = self.cursor.y.saturating_add(1);
-                self.cursor.x = 0;
-            }
-            _ => {}
-        }
-
-        self.pull_view_to_cursor();
-        Ok(())
     }
 
     fn draw_rows(&self) {
@@ -217,13 +195,12 @@ impl Editor {
         Terminal::move_cursor(&Position { x: 0, y: 0 });
     }
 
-    fn move_cursor(&mut self, key: KeyCode) {
-        match key {
-            KeyCode::Up => self.cursor.y = self.cursor.y.saturating_sub(1),
-            KeyCode::Down => self.cursor.y = self.cursor.y.saturating_add(1),
-            KeyCode::Left => self.cursor.x = self.cursor.x.saturating_sub(1),
-            KeyCode::Right => self.cursor.x = self.cursor.x.saturating_add(1),
-            _ => unreachable!("only entered if keycode was an arrow"),
+    fn move_cursor(&mut self, direction: Direction) {
+        match direction {
+            Direction::Up => self.cursor.y = self.cursor.y.saturating_sub(1),
+            Direction::Down => self.cursor.y = self.cursor.y.saturating_add(1),
+            Direction::Left => self.cursor.x = self.cursor.x.saturating_sub(1),
+            Direction::Right => self.cursor.x = self.cursor.x.saturating_add(1),
         };
 
         // stop cursor before end of file
@@ -260,7 +237,8 @@ impl Editor {
 
         // config: status bar items
         let cursor_pos = self.cursor.file_position();
-        let status_notes = vec![&self.document.file_name, "INSERT", &cursor_pos];
+        let mode_text = self.mode.name();
+        let status_notes: Vec<&str> = vec![&self.document.file_name, &mode_text, &cursor_pos];
         let status_formatted = equispace_words(self.terminal.size.width.into(), &status_notes);
 
         // config: status bar color
@@ -322,6 +300,33 @@ impl Editor {
                     // ignore the errors lol
                 }
             };
+        }
+    }
+
+    fn save_document(&mut self) {
+        if self.document.file_name.is_empty() {
+            let name = match self.prompt("Save as: ", None) {
+                Some(n) => n,
+                None => {
+                    format!("unnamed_{:}.txt", Local::now().format("%Y%m%d%H%M"))
+                }
+            };
+            self.document.file_name = name;
+        }
+
+        match self.document.save() {
+            Ok(_) => self
+                .status_message
+                .reset(Some(format!("{} was saved.", self.document.file_name))),
+            Err(err) => {
+                self.status_message.reset(
+                    format!(
+                        "File {} unable to be saved: {}",
+                        self.document.file_name, err
+                    )
+                    .into(),
+                );
+            }
         }
     }
 }
