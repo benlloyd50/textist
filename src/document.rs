@@ -103,6 +103,17 @@ impl Document {
         let _ = row.string.remove(at.x);
     }
 
+    pub(crate) fn _add_blank_line(&mut self, at: &Position) {
+        let row = cmp::min(at.y, self.rows.len());
+        self.rows.insert(row, Row::default());
+    }
+
+    pub(crate) fn add_line_with_spaces_to_cursor(&mut self, at: &Position) {
+        let row = cmp::min(at.y, self.rows.len());
+        self.rows.insert(row, Row {string: " ".repeat(at.x)});
+    }
+
+    // takes whatever is after the position horizontally and moves that to the next line
     pub(crate) fn add_line(&mut self, at: &Position) {
         {
             let Some(curr_row) = self.rows.get(at.y) else {

@@ -1,19 +1,42 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use std::{fmt::Display, io};
 
-use crate::keybinds::control_held;
+// TODO: figure out ways to handle actions like z which require a second press t, b, z
+// TODO: figure out ways to handle actions 100gg which require a number and a second press
+use crossterm::{cursor::SetCursorStyle, event::{KeyCode, KeyEvent, KeyEventKind}, execute};
+
+use crate::{keybinds::control_held, terminal::Terminal};
+
+pub struct ModalInputter {
+    mode: InputMode
+}
+
+impl Default for ModalInputter {
+    fn default() -> Self {
+        Self { mode: Default::default() }
+    }
+}
+
+impl Display for ModalInputter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.mode.to_string())
+    }
+}
 
 pub enum InputAction {
     Save,
     Quit,
-    ModeChange(InputMode),
-    MoveCursor(Direction),
+    SaveAndQuit,
+    MoveCursor{direction: Direction, count: usize},
     InsertChar(char),
-    NewLine,
-    DeleteBehind,
-    DeleteAhead,
-    NoAction, // used when cannot resolve key press into an action
+    SwitchMode(InputMode),
+    NewLine{ count: usize },
+    DeleteBehind { count: usize },
+    DeleteAhead { count: usize },
+    NoAction,
+    NewLineAndInsert(VerticalDirection), // used when cannot resolve key press into an action
 }
 
+#[derive(Clone, Copy)]
 pub enum Direction {
     Up,
     Down,
@@ -41,51 +64,149 @@ impl From<KeyCode> for Direction {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum VerticalDirection {
+    Up,
+    Down
+}
+
 pub enum InputMode {
-    Normal,
+    Normal(NormalInput),
     Insert,
     Command,
 }
 
-pub trait ModalInput {
-    fn name(&self) -> String;
-
-    fn process_key_press(&self, ev_key: KeyEvent) -> InputAction;
+impl Display for InputMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mode = match self {
+            InputMode::Normal(_) => "Normal",
+            InputMode::Insert => "Insert",
+            InputMode::Command => "Command",
+        };
+        write!(f, "{}", mode)
+    }
 }
 
-// TODO: figure out ways to handle actions like z which require a second press t, b, z
-// TODO: figure out ways to handle actions 100gg which require a number and a second press
-pub struct Normal;
-
-impl ModalInput for Normal {
-    fn name(&self) -> String {
-        "Normal".to_string()
+impl Default for InputMode {
+    fn default() -> Self {
+        Self::Normal(NormalInput::default())
     }
+}
 
-    fn process_key_press(&self, ev_key: KeyEvent) -> InputAction {
-        if ev_key.kind != KeyEventKind::Press {
-            return InputAction::NoAction;
-        }
+#[derive(Default, Clone, Copy)]
+pub struct NormalInput {
+    num_modifier: Option<usize>,
+    command: Option<Command>,
+    target: Option<TextTarget>,
+}
 
-        match ev_key.code {
-            KeyCode::Char('i') => InputAction::ModeChange(InputMode::Insert),
-            KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Char('k') | KeyCode::Char('j') => {
-                InputAction::MoveCursor(ev_key.code.into())
+impl NormalInput {
+    // Appends the num to the existing num_modifer or creates it as Some(num)
+    // Ignores 0 if it is the first digit
+    // num MUST be a valid base 10 digit
+    fn insert_num_modifier(&mut self, num: char) {
+        let num: u32 = num.to_digit(10).unwrap();
+
+        self.num_modifier = match self.num_modifier {
+            Some(n) => {
+                Some(n * 10 + n)
             }
-            KeyCode::Char(':') => InputAction::ModeChange(InputMode::Command),
-            _ => InputAction::NoAction,
-        }
+            None => {
+                if num == 0 {
+                    None
+                } else {
+                    Some(num as usize)
+                }
+            }
+        };
     }
 }
 
-pub struct Insert;
+#[derive(Clone, Copy)]
+enum Command {
+    SwitchCommand,
+    SwitchInsert,
+    Move(Direction),
+    Quit,
+    NewLineAndInsert(VerticalDirection),
+    None, // No command, currently used when an unbound key is pressed when waiting on a command
+}
 
-impl ModalInput for Insert {
-    fn name(&self) -> String {
-        "Insert".to_string()
+#[derive(Clone, Copy)]
+enum TextTarget {
+    Nothing,
+    All,
+}
+
+impl ModalInputter {
+    pub fn process_key_press(&mut self, ev_key: KeyEvent) -> InputAction {
+        match self.mode {
+            InputMode::Normal(input) => {
+                let new_input = self.handle_normal_input(ev_key, input);
+                match evaluate_normal_input(new_input) {
+                    Some(action) => {
+                        // the input buffer is reset since we are issuing the action
+                        self.mode = InputMode::Normal(NormalInput::default());
+                        action
+                    }
+                    None => {
+                        // update the input buffer with the new input
+                        self.mode = InputMode::Normal(new_input);
+                        InputAction::NoAction
+                    }
+                }
+            },
+            InputMode::Insert => self.handle_insert_input(ev_key),
+            InputMode::Command => self.handle_command_input(ev_key),
+        }
+
+
     }
 
-    fn process_key_press(&self, ev_key: KeyEvent) -> InputAction {
+    fn handle_normal_input(&self, ev_key: KeyEvent, input_buffer: NormalInput) -> NormalInput {
+        if ev_key.kind != KeyEventKind::Press {
+            return input_buffer
+        }
+
+        let mut new_input = input_buffer.clone();
+        match ev_key.code {
+            KeyCode::Char(num) if num.is_digit(10) => {
+                new_input.insert_num_modifier(num);
+            }
+            KeyCode::Char('o') => {
+                new_input.command = Some(Command::NewLineAndInsert(VerticalDirection::Down));
+            }
+            KeyCode::Char('O') => {
+                new_input.command = Some(Command::NewLineAndInsert(VerticalDirection::Up));
+            }
+            KeyCode::Char('i') => {
+                new_input.command = Some(Command::SwitchInsert);
+            }
+            KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Char('k') | KeyCode::Char('j') => {
+                new_input.command = Some(Command::Move(Direction::from(ev_key.code)));
+            }
+            KeyCode::Char(':') => {
+                new_input.command = Some(Command::SwitchCommand);
+            },
+            KeyCode::Char('Q') => {
+                match new_input.command {
+                    Some(_) => { new_input.target = Some(TextTarget::Nothing);}
+                    None => { new_input.command = Some(Command::None); }
+                }
+            }
+            KeyCode::Char('Z') => {
+                match new_input.command {
+                    Some(_) => { new_input.target = Some(TextTarget::All);}
+                    None => { new_input.command = Some(Command::Quit); }
+                }
+            }
+            _ => {}
+        }
+
+        new_input
+    }
+
+    fn handle_insert_input(&self, ev_key: KeyEvent) -> InputAction {
         if ev_key.kind != KeyEventKind::Press {
             return InputAction::NoAction;
         }
@@ -94,30 +215,73 @@ impl ModalInput for Insert {
             KeyCode::Char('q') if control_held(ev_key) => InputAction::Quit,
             KeyCode::Char('s') if control_held(ev_key) => InputAction::Save,
             KeyCode::Char(c) => InputAction::InsertChar(c),
-            KeyCode::Esc => InputAction::ModeChange(InputMode::Normal),
+            KeyCode::Esc => {
+                InputAction::SwitchMode(InputMode::Normal(NormalInput::default()))
+            },
             KeyCode::Up | KeyCode::Left | KeyCode::Right | KeyCode::Down => {
-                InputAction::MoveCursor(ev_key.code.into())
+                InputAction::MoveCursor{direction: ev_key.code.into(), count: 1}
             }
-            KeyCode::Backspace => InputAction::DeleteBehind,
-            KeyCode::Delete => InputAction::DeleteAhead,
-            KeyCode::Enter => InputAction::NewLine,
+            KeyCode::Backspace => InputAction::DeleteBehind{count: 1},
+            KeyCode::Delete => InputAction::DeleteAhead{count: 1},
+            KeyCode::Enter => InputAction::NewLine{count: 1},
             _ => InputAction::NoAction,
         }
     }
-}
 
-pub struct Command;
-
-impl ModalInput for Command {
-    fn name(&self) -> String {
-        "Command".to_string()
-    }
-
-    fn process_key_press(&self, ev_key: KeyEvent) -> InputAction {
+    fn handle_command_input(&self, ev_key: KeyEvent) -> InputAction {
         if matches!(ev_key.code, KeyCode::Esc) {
-            InputAction::ModeChange(InputMode::Normal)
+            InputAction::SwitchMode(InputMode::Normal(NormalInput::default()))
         } else {
             InputAction::NoAction
         }
     }
+
+    pub(crate) fn switch(&mut self, new_mode: InputMode) {
+        match new_mode {
+            InputMode::Normal(_) => {
+                let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBlock);
+            },
+            InputMode::Insert => {
+                let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
+            }
+            InputMode::Command => {}
+        }
+        self.mode = new_mode;
+    }
+
+}
+
+// Attempts to find a valid input action based on the buffered inputs
+// If the input buffer is not valid, then InputAction::NoAction will be returned
+// If the input buffer is not ready, i.e. waiting for a target, then None will be returned
+fn evaluate_normal_input(input: NormalInput) -> Option<InputAction> {
+    let command = match input.command {
+        Some(c) => c,
+        None => return None,
+    };
+    let count = match input.num_modifier {
+        Some(num) => num,
+        None => 1 // we always want to do the action atleast once
+    };
+
+    let action = match command {
+        Command::SwitchCommand => InputAction::SwitchMode(InputMode::Command),
+        Command::SwitchInsert => InputAction::SwitchMode(InputMode::Insert),
+        Command::Move(direction) => InputAction::MoveCursor{direction, count},
+        Command::NewLineAndInsert(v_direction) => InputAction::NewLineAndInsert(v_direction),
+        Command::Quit => {
+            match input.target {
+                Some(target) => {
+                    match target {
+                        TextTarget::Nothing => InputAction::Quit,
+                        TextTarget::All => InputAction::SaveAndQuit,
+                    }
+                }
+                None => return None
+            }
+        }
+        Command::None => InputAction::NoAction,
+    };
+
+    Some(action)
 }
