@@ -8,6 +8,7 @@ mod keybinds;
 mod modal;
 mod status_message;
 mod terminal;
+mod text_target;
 
 fn main() {
     Editor::default().run();

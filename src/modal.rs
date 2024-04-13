@@ -2,17 +2,23 @@ use std::{fmt::Display, io};
 
 // TODO: figure out ways to handle actions like z which require a second press t, b, z
 // TODO: figure out ways to handle actions 100gg which require a number and a second press
-use crossterm::{cursor::SetCursorStyle, event::{KeyCode, KeyEvent, KeyEventKind}, execute};
+use crossterm::{
+    cursor::SetCursorStyle,
+    event::{KeyCode, KeyEvent, KeyEventKind},
+    execute,
+};
 
-use crate::{keybinds::control_held, terminal::Terminal};
+use crate::{keybinds::control_held, text_target::TextTarget};
 
 pub struct ModalInputter {
-    mode: InputMode
+    mode: InputMode,
 }
 
 impl Default for ModalInputter {
     fn default() -> Self {
-        Self { mode: Default::default() }
+        Self {
+            mode: Default::default(),
+        }
     }
 }
 
@@ -23,17 +29,21 @@ impl Display for ModalInputter {
 }
 
 pub enum InputAction {
+    NoAction,       // used when key press cannot resolve into an action
+    InvalidCommand, // when command mode does not produce a valid command
     Save,
     Quit,
     SaveAndQuit,
-    MoveCursor{direction: Direction, count: usize},
+    MoveCursor { direction: Direction, count: usize },
     InsertChar(char),
     SwitchMode(InputMode),
-    NewLine{ count: usize },
+    NewLine { count: usize },
     DeleteBehind { count: usize },
     DeleteAhead { count: usize },
-    NoAction,
-    NewLineAndInsert(VerticalDirection), // used when cannot resolve key press into an action
+    PasteYanked(Direction),
+    NewLineAndInsert(VerticalDirection),
+    CommandPrompt,
+    Delete(TextTarget),
 }
 
 #[derive(Clone, Copy)]
@@ -67,7 +77,7 @@ impl From<KeyCode> for Direction {
 #[derive(Clone, Copy)]
 pub enum VerticalDirection {
     Up,
-    Down
+    Down,
 }
 
 pub enum InputMode {
@@ -108,9 +118,7 @@ impl NormalInput {
         let num: u32 = num.to_digit(10).unwrap();
 
         self.num_modifier = match self.num_modifier {
-            Some(n) => {
-                Some(n * 10 + n)
-            }
+            Some(n) => Some(n * 10 + n),
             None => {
                 if num == 0 {
                     None
@@ -124,18 +132,14 @@ impl NormalInput {
 
 #[derive(Clone, Copy)]
 enum Command {
-    SwitchCommand,
     SwitchInsert,
     Move(Direction),
     Quit,
     NewLineAndInsert(VerticalDirection),
-    None, // No command, currently used when an unbound key is pressed when waiting on a command
-}
-
-#[derive(Clone, Copy)]
-enum TextTarget {
-    Nothing,
-    All,
+    None,
+    CommandInput,
+    Delete,
+    Paste(Direction), // No command, currently used when an unbound key is pressed when waiting on a command
 }
 
 impl ModalInputter {
@@ -155,17 +159,15 @@ impl ModalInputter {
                         InputAction::NoAction
                     }
                 }
-            },
+            }
             InputMode::Insert => self.handle_insert_input(ev_key),
-            InputMode::Command => self.handle_command_input(ev_key),
+            InputMode::Command => InputAction::CommandPrompt,
         }
-
-
     }
 
     fn handle_normal_input(&self, ev_key: KeyEvent, input_buffer: NormalInput) -> NormalInput {
         if ev_key.kind != KeyEventKind::Press {
-            return input_buffer
+            return input_buffer;
         }
 
         let mut new_input = input_buffer.clone();
@@ -179,6 +181,23 @@ impl ModalInputter {
             KeyCode::Char('O') => {
                 new_input.command = Some(Command::NewLineAndInsert(VerticalDirection::Up));
             }
+            KeyCode::Char('d') => match new_input.command {
+                Some(command) => match command {
+                    Command::Delete => new_input.target = Some(TextTarget::WholeRow),
+                    _ => new_input.command = Some(Command::None),
+                },
+                None => new_input.command = Some(Command::Delete),
+            },
+            KeyCode::Char('x') => {
+                new_input.command = Some(Command::Delete);
+                new_input.target = Some(TextTarget::UnderCursor);
+            }
+            KeyCode::Char('p') => new_input.command = Some(Command::Paste(Direction::Right)),
+            KeyCode::Char('P') => new_input.command = Some(Command::Paste(Direction::Left)),
+            KeyCode::Char('D') => {
+                new_input.command = Some(Command::Delete);
+                new_input.target = Some(TextTarget::RowAfterCursor);
+            }
             KeyCode::Char('i') => {
                 new_input.command = Some(Command::SwitchInsert);
             }
@@ -186,20 +205,24 @@ impl ModalInputter {
                 new_input.command = Some(Command::Move(Direction::from(ev_key.code)));
             }
             KeyCode::Char(':') => {
-                new_input.command = Some(Command::SwitchCommand);
+                new_input.command = Some(Command::CommandInput);
+            }
+            KeyCode::Char('Q') => match new_input.command {
+                Some(_) => {
+                    new_input.target = Some(TextTarget::Nothing);
+                }
+                None => {
+                    new_input.command = Some(Command::None);
+                }
             },
-            KeyCode::Char('Q') => {
-                match new_input.command {
-                    Some(_) => { new_input.target = Some(TextTarget::Nothing);}
-                    None => { new_input.command = Some(Command::None); }
+            KeyCode::Char('Z') => match new_input.command {
+                Some(_) => {
+                    new_input.target = Some(TextTarget::All);
                 }
-            }
-            KeyCode::Char('Z') => {
-                match new_input.command {
-                    Some(_) => { new_input.target = Some(TextTarget::All);}
-                    None => { new_input.command = Some(Command::Quit); }
+                None => {
+                    new_input.command = Some(Command::Quit);
                 }
-            }
+            },
             _ => {}
         }
 
@@ -212,27 +235,19 @@ impl ModalInputter {
         }
 
         match ev_key.code {
-            KeyCode::Char('q') if control_held(ev_key) => InputAction::Quit,
             KeyCode::Char('s') if control_held(ev_key) => InputAction::Save,
             KeyCode::Char(c) => InputAction::InsertChar(c),
-            KeyCode::Esc => {
-                InputAction::SwitchMode(InputMode::Normal(NormalInput::default()))
-            },
+            KeyCode::Esc => InputAction::SwitchMode(InputMode::Normal(NormalInput::default())),
             KeyCode::Up | KeyCode::Left | KeyCode::Right | KeyCode::Down => {
-                InputAction::MoveCursor{direction: ev_key.code.into(), count: 1}
+                InputAction::MoveCursor {
+                    direction: ev_key.code.into(),
+                    count: 1,
+                }
             }
-            KeyCode::Backspace => InputAction::DeleteBehind{count: 1},
-            KeyCode::Delete => InputAction::DeleteAhead{count: 1},
-            KeyCode::Enter => InputAction::NewLine{count: 1},
+            KeyCode::Backspace => InputAction::DeleteBehind { count: 1 },
+            KeyCode::Delete => InputAction::DeleteAhead { count: 1 },
+            KeyCode::Enter => InputAction::NewLine { count: 1 },
             _ => InputAction::NoAction,
-        }
-    }
-
-    fn handle_command_input(&self, ev_key: KeyEvent) -> InputAction {
-        if matches!(ev_key.code, KeyCode::Esc) {
-            InputAction::SwitchMode(InputMode::Normal(NormalInput::default()))
-        } else {
-            InputAction::NoAction
         }
     }
 
@@ -240,7 +255,7 @@ impl ModalInputter {
         match new_mode {
             InputMode::Normal(_) => {
                 let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBlock);
-            },
+            }
             InputMode::Insert => {
                 let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
             }
@@ -249,6 +264,14 @@ impl ModalInputter {
         self.mode = new_mode;
     }
 
+    pub(crate) fn evaluate_cmd_input(&self, cmd_input: &str) -> InputAction {
+        match cmd_input {
+            "w" => InputAction::Save,
+            "q" => InputAction::Quit,
+            "wq" => InputAction::SaveAndQuit,
+            _ => InputAction::InvalidCommand,
+        }
+    }
 }
 
 // Attempts to find a valid input action based on the buffered inputs
@@ -261,25 +284,27 @@ fn evaluate_normal_input(input: NormalInput) -> Option<InputAction> {
     };
     let count = match input.num_modifier {
         Some(num) => num,
-        None => 1 // we always want to do the action atleast once
+        None => 1, // we always want to do the action atleast once
     };
 
     let action = match command {
-        Command::SwitchCommand => InputAction::SwitchMode(InputMode::Command),
+        Command::Paste(direction) => InputAction::PasteYanked(direction),
+        Command::CommandInput => InputAction::CommandPrompt,
         Command::SwitchInsert => InputAction::SwitchMode(InputMode::Insert),
-        Command::Move(direction) => InputAction::MoveCursor{direction, count},
+        Command::Move(direction) => InputAction::MoveCursor { direction, count },
         Command::NewLineAndInsert(v_direction) => InputAction::NewLineAndInsert(v_direction),
-        Command::Quit => {
-            match input.target {
-                Some(target) => {
-                    match target {
-                        TextTarget::Nothing => InputAction::Quit,
-                        TextTarget::All => InputAction::SaveAndQuit,
-                    }
-                }
-                None => return None
-            }
-        }
+        Command::Quit => match input.target {
+            Some(target) => match target {
+                TextTarget::Nothing => InputAction::Quit,
+                TextTarget::All => InputAction::SaveAndQuit,
+                _ => InputAction::NoAction,
+            },
+            None => return None,
+        },
+        Command::Delete => match input.target {
+            Some(target) => InputAction::Delete(target),
+            None => return None,
+        },
         Command::None => InputAction::NoAction,
     };
 

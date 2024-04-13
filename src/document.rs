@@ -5,7 +5,7 @@ use std::{
 
 use crossterm::style::Stylize;
 
-use crate::editor::Position;
+use crate::{editor::Position, text_target::TextTarget};
 
 #[derive(Default)]
 pub struct Document {
@@ -84,12 +84,14 @@ impl Document {
         at.x = at.x.saturating_sub(1);
     }
 
-    pub(crate) fn remove_ahead(&mut self, at: &mut Position) {
-        let curr_row = self.rows.get(at.y).unwrap();
+    pub(crate) fn remove_ahead(&mut self, at: &mut Position) -> Option<char> {
+        let Some(curr_row) = self.rows.get(at.y) else {
+            return None;
+        };
         let mut old_row = None;
         if at.x == curr_row.len() {
             if at.y >= self.rows.len() - 1 {
-                return;
+                return None;
             }
             old_row = Some(self.rows.remove(at.y + 1));
         }
@@ -97,10 +99,10 @@ impl Document {
         let row = self.rows.get_mut(at.y).unwrap();
         if let Some(text) = old_row {
             row.string += &text.string;
-            return;
+            return None;
         }
 
-        let _ = row.string.remove(at.x);
+        Some(row.string.remove(at.x))
     }
 
     pub(crate) fn _add_blank_line(&mut self, at: &Position) {
@@ -110,7 +112,12 @@ impl Document {
 
     pub(crate) fn add_line_with_spaces_to_cursor(&mut self, at: &Position) {
         let row = cmp::min(at.y, self.rows.len());
-        self.rows.insert(row, Row {string: " ".repeat(at.x)});
+        self.rows.insert(
+            row,
+            Row {
+                string: " ".repeat(at.x),
+            },
+        );
     }
 
     // takes whatever is after the position horizontally and moves that to the next line
@@ -138,12 +145,57 @@ impl Document {
         curr_row.string.truncate(at.x);
     }
 
+    pub(crate) fn delete(&mut self, at: &mut Position, target: &TextTarget) -> String {
+        match target {
+            TextTarget::Char(_) => todo!(),
+            TextTarget::Nothing => todo!(),
+            TextTarget::All => todo!(),
+            TextTarget::UnderCursor => match self.remove_ahead(at) {
+                Some(char) => char.to_string(),
+                None => "".to_string(),
+            },
+            TextTarget::WholeRow => {
+                let old_row = self.rows.remove(at.y);
+                old_row.string
+            }
+            TextTarget::RowAfterCursor => match self.rows.get_mut(at.y) {
+                Some(row) => {
+                    let (new_str, deleted_str) = row.string.split_at(at.x);
+                    let deleted_str: String = deleted_str.to_string();
+                    row.string = new_str.to_string();
+                    deleted_str
+                }
+                None => String::new(),
+            },
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
     pub(crate) fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    pub(crate) fn insert_str(&mut self, at: &Position, str: &str) {
+        let row = match self.rows.get_mut(at.y) {
+            Some(row) => row,
+            None => {
+                self.rows.insert(at.y, Row::default());
+                // unwrap - insertion prior so it should be there
+                self.rows.get_mut(at.y).unwrap()
+            }
+        };
+
+        row.string.insert_str(at.x, str);
+    }
+
+    pub(crate) fn current_row_length(&self, at: &Position) -> usize {
+        match self.rows.get(at.y) {
+            Some(row) => row.string.len(),
+            None => 0,
+        }
     }
 }
 

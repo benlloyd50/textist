@@ -9,7 +9,7 @@ use crossterm::{
 
 use crate::{
     document::Document,
-    modal::{Direction, InputAction, InputMode, ModalInputter, VerticalDirection},
+    modal::{Direction, InputAction, InputMode, ModalInputter, NormalInput, VerticalDirection},
 };
 use crate::{status_message::StatusMessage, terminal::Terminal};
 
@@ -26,6 +26,7 @@ pub struct Editor {
     offset: Position,
 
     input: ModalInputter,
+    yanked: String,
 
     status_message: StatusMessage,
 }
@@ -75,7 +76,8 @@ impl Default for Editor {
             cursor: Position { x: 0, y: 0 },
             offset: Position { x: 0, y: 0 },
             status_message: StatusMessage::new("Welcome to Textist".to_string()),
-            input: ModalInputter::default()
+            input: ModalInputter::default(),
+            yanked: "".to_string(),
         }
     }
 }
@@ -116,26 +118,27 @@ impl Editor {
     fn handle_action(&mut self, action: InputAction) {
         match action {
             InputAction::NoAction => {}
+            InputAction::InvalidCommand => {}
             InputAction::Save => {
                 self.save_document();
             }
             InputAction::Quit => {
                 self.should_quit = true;
             }
-            InputAction::MoveCursor{direction, count} => self.move_cursor(direction, count),
+            InputAction::MoveCursor { direction, count } => self.move_cursor(direction, count),
             InputAction::InsertChar(c) => {
                 self.document.insert(&self.cursor, c);
                 self.move_cursor(Direction::Right, 1);
             }
-            InputAction::NewLine{count} => {
+            InputAction::NewLine { count } => {
                 self.document.add_line(&self.cursor);
                 self.move_cursor(Direction::Down, 1);
                 self.cursor.x = 0;
             }
-            InputAction::DeleteBehind{count} => {
+            InputAction::DeleteBehind { count } => {
                 self.document.remove_behind(&mut self.cursor);
             }
-            InputAction::DeleteAhead{count} => {
+            InputAction::DeleteAhead { count } => {
                 self.document.remove_ahead(&mut self.cursor);
             }
             InputAction::SwitchMode(new_mode) => {
@@ -145,18 +148,42 @@ impl Editor {
                 self.save_document();
                 self.should_quit = true;
             }
-            InputAction::NewLineAndInsert(vertical_direction) => {
-                match vertical_direction {
-                    VerticalDirection::Up => {
-                        self.document.add_line_with_spaces_to_cursor(&self.cursor);
-                        self.input.switch(InputMode::Insert);
-                    }
-                    VerticalDirection::Down => {
-                        self.move_cursor(Direction::Down, 1);
-                        self.document.add_line_with_spaces_to_cursor(&self.cursor);
-                        self.input.switch(InputMode::Insert);
-                    }
+            InputAction::NewLineAndInsert(vertical_direction) => match vertical_direction {
+                VerticalDirection::Up => {
+                    self.document.add_line_with_spaces_to_cursor(&self.cursor);
+                    self.input.switch(InputMode::Insert);
                 }
+                VerticalDirection::Down => {
+                    self.move_cursor(Direction::Down, 1);
+                    self.document.add_line_with_spaces_to_cursor(&self.cursor);
+                    self.input.switch(InputMode::Insert);
+                }
+            },
+            InputAction::CommandPrompt => {
+                self.input.switch(InputMode::Command);
+                self.draw_status_bar();
+                let action = match self.prompt(":", None) {
+                    Some(cmd_input) => self.input.evaluate_cmd_input(&cmd_input),
+                    None => InputAction::NoAction,
+                };
+                self.handle_action(action);
+                self.input.switch(InputMode::Normal(NormalInput::default()));
+            }
+            InputAction::PasteYanked(direction) => match direction {
+                Direction::Left => {
+                    self.document.insert_str(&self.cursor, &self.yanked);
+                    self.move_cursor(Direction::Right, self.yanked.len());
+                }
+                Direction::Right => {
+                    self.move_cursor(Direction::Right, 1);
+                    self.document.insert_str(&self.cursor, &self.yanked);
+                    self.move_cursor(Direction::Right, self.yanked.len() - 1);
+                }
+                _ => {}
+            },
+            InputAction::Delete(target) => {
+                self.yanked = self.document.delete(&mut self.cursor, &target);
+                self.bound_cursor_to_line();
             }
         }
     }
@@ -219,25 +246,27 @@ impl Editor {
         };
 
         // stop cursor before end of file
-        self.cursor.y = cmp::min(self.cursor.y, self.document.len() - 1);
-
-        let max_x = match self.document.rows.get(self.cursor.y) {
-            Some(row) => row.len(),
-            None => 0,
-        };
-        self.cursor.x = cmp::min(self.cursor.x, max_x);
+        self.bound_cursor_to_line();
     }
 
     // Pulls the viewport (offset) to make the cursor be in it
     fn pull_view_to_cursor(&mut self) {
         if self.cursor.x > self.offset.x + self.terminal.size.width as usize - 1 {
-            self.offset.x = self.cursor.x.saturating_sub(self.terminal.size.width as usize) + 1;
+            self.offset.x = self
+                .cursor
+                .x
+                .saturating_sub(self.terminal.size.width as usize)
+                + 1;
         } else if self.cursor.x < self.offset.x {
             self.offset.x = self.cursor.x;
         }
 
         if self.cursor.y > self.offset.y + self.terminal.size.height as usize - 3 {
-            self.offset.y = self.cursor.y.saturating_sub(self.terminal.size.height as usize) + 3;
+            self.offset.y = self
+                .cursor
+                .y
+                .saturating_sub(self.terminal.size.height as usize)
+                + 3;
         } else if self.cursor.y < self.offset.y {
             self.offset.y = self.cursor.y;
         }
@@ -284,6 +313,7 @@ impl Editor {
             x: 0,
             y: self.terminal.size.height as usize - 1,
         });
+        Terminal::clear_line();
         let mut result = start_response.unwrap_or("").to_string();
         loop {
             self.status_message
@@ -303,9 +333,10 @@ impl Editor {
                             KeyCode::Char(c) => result.push(c),
                             KeyCode::Enter => return Some(result),
                             KeyCode::Esc => return None,
-                            KeyCode::Backspace => {
-                                let _ = result.pop();
-                            }
+                            KeyCode::Backspace => match result.pop() {
+                                Some(_) => {}
+                                None => return None,
+                            },
                             _ => {}
                         }
                     }
@@ -315,6 +346,7 @@ impl Editor {
                     // ignore the errors lol
                 }
             };
+            Terminal::clear_line();
         }
     }
 
@@ -343,6 +375,16 @@ impl Editor {
                 );
             }
         }
+    }
+
+    // Pulls the cursor within the bounds of the current line and the document lines count
+    fn bound_cursor_to_line(&mut self) {
+        self.cursor.x = cmp::min(
+            self.cursor.x,
+            self.document.current_row_length(&self.cursor),
+        );
+
+        self.cursor.y = cmp::min(self.cursor.y, self.document.len().saturating_sub(1));
     }
 }
 
