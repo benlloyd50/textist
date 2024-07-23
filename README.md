@@ -23,7 +23,7 @@ cargo run [file name]
     - [ ] General Settings
     - [ ] Status Bar
     - [ ] Keybindings
-- [ ] Modal Editing
+- [X] Modal Editing
 - [ ] Live updates on file (VS-code style)
 
 
